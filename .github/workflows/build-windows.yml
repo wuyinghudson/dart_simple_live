@@ -1,0 +1,85 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master, main]
+
+permissions:
+  contents: write
+
+env:
+  PROJECT_DIR: simple_live_app
+
+jobs:
+  build:
+    # ★ 用 2022 而非 latest，彻底躲开 VS2026 把 <experimental/coroutine> 变 error 的坑
+    runs-on: windows-2022
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      # ---------- 可选：从 pubspec.yaml 读出版本号 ----------
+      - name: 🏷️ Read version
+        id: ver
+        shell: pwsh
+        run: |
+          $content = Get-Content "$env:GITHUB_WORKSPACE\${{ env.PROJECT_DIR }}\pubspec.yaml" -Raw
+          if ($content -match '(?m)^version:\s*([\d.]+)\+?\d*') {
+            $v = $Matches[1]
+            echo "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            echo "APP_VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append
+            Write-Host "Got version: $v"
+          } else {
+            echo "version=0.0.0" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            echo "APP_VERSION=dev" | Out-File -FilePath $env:GITHUB_ENV -Append
+          }
+
+      # ---------- Flutter ----------
+      - name: 🦋 Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          # 不硬锁版本 = 用当前 stable（3.2x 系）
+          # 如果你想要可重复构建，把这行解开：
+          # flutter-version: "3.24.5"
+          cache: true
+
+      - name: 🖥️ Enable Windows desktop
+        run: flutter config --enable-windows-desktop
+
+      - name: 📦 Pub get
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: flutter pub get
+
+      - name: 🔧 Build
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: flutter build windows --release
+
+      # ---------- 打包 ----------
+      - name: 📦 Zip
+        shell: pwsh
+        run: |
+          $rel = "$env:GITHUB_WORKSPACE\${{ env.PROJECT_DIR }}\build\windows\x64\runner\Release"
+          $zip = "SimpleLive-v${{ steps.ver.outputs.version }}.zip"
+          Compress-Archive -Path "$rel\*" -DestinationPath $zip -Force
+          echo "ZIP=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      # ---------- Release ----------
+      - name: 🚀 Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}.${{ github.run_number }}
+          name: Simple Live v${{ steps.ver.outputs.version }} (#${{ github.run_number }})
+          draft: false
+          prerelease: false
+          files: ${{ env.ZIP }}
+          body: |
+            📦 自动构建 · dart_simple_live
+            - 版本：`${{ steps.ver.outputs.version }}`
+            - 构建：#${{ github.run_number }}
+            - commit：[${{ github.sha }}](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})
+            - 用法：下载 ZIP → 解压 → 双击 `simple_live.exe`（**不要把 exe 单独拿出来**）
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
